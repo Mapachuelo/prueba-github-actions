@@ -1,0 +1,99 @@
+name: Empaquetado por version
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - version.txt
+
+permissions:
+  contents: write
+
+jobs:
+  empaquetar:
+    name: Empaquetar y publicar
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clonar repositorio
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Leer version desde version.txt
+        id: version
+        run: |
+          set -euo pipefail
+          VERSION=$(tr -d '[:space:]' < version.txt)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Version detectada: $VERSION"
+
+      - name: Validar SemVer y detectar cambio
+        id: validar
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+
+          # SemVer: MAJOR.MINOR.PATCH con sufijo opcional (-beta.1) y metadata opcional (+build)
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::La version '$VERSION' no es SemVer valida. Usa MAJOR.MINOR.PATCH (ej: 0.1.1) o con sufijo (ej: 0.1.2-beta.1)."
+            exit 1
+          fi
+
+          # Compara con el version.txt del commit anterior (si existe)
+          ANTERIOR=""
+          if git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            ANTERIOR=$(git show "${BEFORE}:version.txt" 2>/dev/null | tr -d '[:space:]' || true)
+          fi
+
+          if [ "$ANTERIOR" = "$VERSION" ]; then
+            echo "::error::version.txt sigue en $VERSION. Cambia la version antes de hacer push."
+            exit 1
+          fi
+
+          # Evita reutilizar un tag ya publicado
+          if git rev-parse -q --verify "refs/tags/v${VERSION}" >/dev/null; then
+            echo "::error::El tag v${VERSION} ya existe. Sube un numero de version nuevo."
+            exit 1
+          fi
+
+          echo "anterior=${ANTERIOR:-ninguna}" >> "$GITHUB_OUTPUT"
+          echo "Version anterior: ${ANTERIOR:-ninguna} -> nueva: $VERSION"
+
+      - name: Determinar estable o prerelease
+        id: tipo
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          TIPO="estable"
+          PRE="false"
+          if [[ "$VERSION" == *-* ]]; then
+            TIPO="prerelease"
+            PRE="true"
+          fi
+          echo "prerelease=$PRE" >> "$GITHUB_OUTPUT"
+          echo "etiqueta=$TIPO" >> "$GITHUB_OUTPUT"
+          echo "La version $VERSION se publicara como $TIPO"
+
+      - name: Crear ZIP del codigo fuente
+        run: |
+          set -euo pipefail
+          NOMBRE="source-v${{ steps.version.outputs.version }}.zip"
+          git archive --format=zip --output="$NOMBRE" HEAD
+          ls -lh "$NOMBRE"
+
+      - name: Publicar tag y Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: v${{ steps.version.outputs.version }}
+          body: |
+            Empaquetado automatico de la version `${{ steps.version.outputs.version }}` (${{ steps.tipo.outputs.etiqueta }}).
+
+            Cambio de version: `${{ steps.validar.outputs.anterior }}` -> `${{ steps.version.outputs.version }}`
+          prerelease: ${{ steps.tipo.outputs.prerelease }}
+          files: source-v${{ steps.version.outputs.version }}.zip
+          fail_on_unmatched_files: true
+          generate_release_notes: true
